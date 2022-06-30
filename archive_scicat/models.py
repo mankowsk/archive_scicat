@@ -462,7 +462,7 @@ class Experiment():
         if not converted_json_directory.exists():
             converted_json_directory = None
             print('------DIRECTORY OF CONVERTED JSON FILES NOT FOUND: ONLY ORIGINAL JSON FILES WILL BE ARCHIVED------')
-        assert(f'/sf/bernina/data/{self.pgroup}/res/' in json_directory.as_posix()), f'/sf/bernina/data/{self.pgroup}/res/ is not in the json directors - please use absolute paths for archiving to work'
+        assert(f'/sf/bernina/data/{self.pgroup}/res/' in json_directory.as_posix()), f'/sf/bernina/data/{self.pgroup}/res/ is not in the json directories - please use absolute paths for archiving to work'
         runs = {int(f.stem[3:7]): f for f in json_directory.glob('*.json')}
         self.runs = runs
         for run_number, json_file_path in runs.items():
@@ -534,18 +534,18 @@ class Experiment():
             directory = f'/sf/bernina/data/{pgroup}/'
             print(f'Folder not specified, parsing all subfolders of /res/ and /raw/ of the pgroup directory: {directory}')
             local_path_res = Path(directory+'res/')
-            local_files_res = np.array([f.as_posix() for f in local_path_res.rglob('*.*')])
+            local_files_res = np.array([f.as_posix() for f in local_path_res.rglob('*.*') if f.is_file()])
             print(f'Found {len(local_files_res)} files in {self.pgroup}/res/')
 
             local_path_raw = Path(directory+'raw/')
-            local_files_raw = np.array([f.as_posix() for f in local_path_raw.rglob('*.*')])
+            local_files_raw = np.array([f.as_posix() for f in local_path_raw.rglob('*.*') if f.is_file()])
             print(f'Found {len(local_files_raw)} files in {self.pgroup}/raw/')
 
             local_files = np.hstack([local_files_res, local_files_raw])
         else:
             print(f'Parsing all subfolders of directory: {directory}')
             local_path = Path(directory)
-            local_files = np.array([f.as_posix() for f in local_path.rglob('*.*')])
+            local_files = np.array([f.as_posix() for f in local_path.rglob('*.*') if f.is_file()])
             print(f'Found {len(local_files)} files in {self.pgroup}')
 
 
@@ -572,7 +572,45 @@ class Experiment():
         }
         return data
 
+    def append_dataset_from_files(self, name, files):
+        """Appends a dataset with a specified file list to the Experiment instance. 
+        Adds only the most basic metadata required for archiving"""
+        ds = Dataset(
+        pid=None,
+        name=name,
+        client=self.client,
+        pgroup=self.pgroup,
+        run_number=None,
+        get_datacat_metadata=True,
+        )
 
+        metadata = {
+        'files_list': files,
+        'metadata': {'type': 'raw',
+        'creationLocation': '/PSI/swissfel/bernina',
+        'sourceFolder': '//',
+        'ownerGroup': self.pgroup,
+        'datasetName': name},
+        'scientificMetadata': {},
+        }
+        
+        ds.archive_data.data=metadata
+        self.datasets.append_ds(ds, name)
+        print(f"Appended {name} to datasets")
+
+    def append_dataset_from_directories(self, name, directories, recursive = True):
+        """Searches files in the given list of top directories and their subfolders (recursive by default) and appends a dataset to the Experiment instance. 
+        Adds only the most basic metadata required for archiving"""
+
+        files = []
+        for directory in directories:
+            p = Path(directory)
+            if recursive:
+                f = [a.as_posix() for a in p.rglob("*.*")]
+            else:
+                f = [a.as_posix() for a in p.glob("*.*")]
+            files.extend(f)
+        self.append_dataset_from_files(name=name, files=files)
 
 class Archiver:
     def __init__(
