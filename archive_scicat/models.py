@@ -91,16 +91,25 @@ def convert_jsons(pgroup = None, current_json_directory = None, new_directory = 
     print(f'Original json directory: {current_json_directory}')
     print(f'Modified json directory: {new_directory}')
     print(f"Found {len(runs)} json files")
+    exceptions = {}
     for run, f in runs.items():
-        print(f"converting run {run}")
-        s,p=read_json(f)
-        scan_files = s['scan_files']
-        scan_files_new = [[step_file.replace(path_to_replace, replace_by) for step_file in step_files] for step_files in scan_files]
-        s['scan_files'] = scan_files_new
-        new_json_file = new_directory.joinpath(p.name)
-        with new_json_file.open('w') as f:
-            json.dump(s, f)
-    print('DONE')
+        try:
+            print(f"converting run {run}")
+            s,p=read_json(f)
+            scan_files = s['scan_files']
+            scan_files_new = [[step_file.replace(path_to_replace, replace_by) for step_file in step_files] for step_files in scan_files]
+            s['scan_files'] = scan_files_new
+            new_json_file = new_directory.joinpath(p.name)
+            with new_json_file.open('w') as f:
+                json.dump(s, f)
+        except Exception as e:
+            exceptions[run] = str(e)
+    if len(exceptions) > 0:
+        print('DONE WITH THE FOLLOWING EXCEPTIONS:')
+        for run, e in exceptions.items():
+            print(run, e)
+    else:
+        print("DONE WITHOUT EXCEPTIONS")
 
 class Data_Catalogue_Class():
     def __init__(
@@ -410,11 +419,32 @@ class Experiment():
         self.rt = None
         self.client = ScicatClient()
         self.datasets = Datasets()
+        self.datasets_from_scicat = Datasets()
         if elog_address is not None:
             self.log = elog.open(elog_address)
 
-    def init_datasets_from_scicat(self, json_directory = None, converted_json_directory = None, run_table_keys=None, elog=False):
-        pass
+    def init_datasets_from_scicat(self, json_directory = None, converted_json_directory = None, run_table_keys=None, elog=False, overwrite=False):
+        datasets = self.get_datacat_datasets_filtered(filter = {'ownerGroup': self.pgroup}).json()
+        for dataset in datasets:
+            run_number = None
+            try:
+                scimet = dataset['scientificMetadata']
+                if 'runNumber' in scimet.keys():
+                    if type(scimet['runNumber']) == dict:
+                        run_number = scimet['runNumber']['value']
+                    else:
+                        run_number = scimet['runNumber']
+            except:
+                pass
+            ds = Dataset(
+                client=self.client,
+                pgroup=self.pgroup,
+                pid = dataset['pid'],
+                name = dataset['datasetName'],
+                run_number = run_number,
+            )
+            self.datasets_from_scicat.append_ds(name=dataset['datasetName'].replace(" ", "_"), ds=ds)
+            print(f'Appended {dataset["datasetName"]} to self.datasets_from_scicat')
 
     def init_datasets_from_json_directory(self, json_directory = None, converted_json_directory = None, run_table_keys=None, elog=False):
         if type(json_directory) == str:
@@ -491,6 +521,59 @@ class Experiment():
         res = requests.get(f'{dacat}datasets/fullquery/?access_token={self.client.token}', json=data, verify=False)
         return res
 
+    def get_dataset_files(self, pid):
+        res = requests.get(f'{dacat}datasets/fullquery/?access_token={self.client.token}', json=data, verify=False)
+
+    def check_for_non_archived_files(self, directory=None):
+        """
+        Returns a dictionary containing numpy arrays with the files found on SciCat, the local files in all 
+        subfolders of the specified directory and the files, which are in the directory but not on scicat
+        """
+        pgroup = self.pgroup
+        if directory == None:
+            directory = f'/sf/bernina/data/{pgroup}/'
+            print(f'Folder not specified, parsing all subfolders of /res/ and /raw/ of the pgroup directory: {directory}')
+            local_path_res = Path(directory+'res/')
+            local_files_res = np.array([f.as_posix() for f in local_path_res.rglob('*.*')])
+            print(f'Found {len(local_files_res)} files in {self.pgroup}/res/')
+
+            local_path_raw = Path(directory+'raw/')
+            local_files_raw = np.array([f.as_posix() for f in local_path_raw.rglob('*.*')])
+            print(f'Found {len(local_files_raw)} files in {self.pgroup}/raw/')
+
+            local_files = np.hstack([local_files_res, local_files_raw])
+        else:
+            print(f'Parsing all subfolders of directory: {directory}')
+            local_path = Path(directory)
+            local_files = np.array([f.as_posix() for f in local_path.rglob('*.*')])
+            print(f'Found {len(local_files)} files in {self.pgroup}')
+
+
+
+        data = {'fields': {'ownerGroup': pgroup}}
+        js_scicat = requests.get(f'{dacat}/origdatablocks/fullquery/?access_token={self.client.token}', json=data, verify=False).json()
+        sc_pids, sc_files = np.array([[f['datasetId'], f['dataFileList']['path']] for f in js_scicat]).T
+        print(f'Found {len(js_scicat)} files on SciCat of pgroup {self.pgroup}')
+
+        archived_ds = self.get_datacat_datasets_filtered({'ownerGroup': self.pgroup, 'datasetlifecycle.retrievable': True}).json()
+        all_ds = self.get_datacat_datasets_filtered({'ownerGroup': self.pgroup, 'datasetlifecycle.retrievable': True}).json()
+        all_ds_pids = np.array([ds['pid'] for ds in all_ds])
+        archived_ds_pids = np.array([ds['pid'] for ds in archived_ds])
+        print(f'Dataset stats: {len(archived_ds_pids)} out of {len(all_ds_pids)} datasets on SciCat are archived')
+        sc_files_archived = sc_files[np.isin(sc_pids, archived_ds_pids)]
+        print(f'File stats: {len(sc_files_archived)} out of {len(js_scicat)} files on SciCat are archived')
+
+        data = {
+            "scicat": sc_files,
+            "scicat_archived": sc_files_archived,
+            "local": local_files,
+            "local_not_archived": local_files[~np.isin(local_files, sc_files_archived)],
+            "scicat_datasets_not_archived": all_ds_pids[~np.isin(all_ds_pids, archived_ds_pids)]
+        }
+        return data
+
+
+
 class Archiver:
     def __init__(
         self,
@@ -498,6 +581,15 @@ class Archiver:
     ):
         self.ds=ds
         self.data={}
+
+    def remove_leading_slash(self, files):
+        fs = []
+        for f in files:
+            if f[0] == "/":
+                fs.append(f[1:])
+            else:
+                fs.append(f)
+        return fs
 
     def get_metadata_from_json(self, run_number  = None, pgroup=None, scan_info_dir = '/res/scan_info/', json_file_path=None):
         if pgroup is None:
@@ -634,6 +726,7 @@ class Archiver:
     def ingest_from_Ra(self, folder_filelist = './archive', autoarchive=False, ingest=True, silent=False, test_env=False):
 
         data = self.data.copy()
+        #data['files_list'] = self.remove_leading_slash(data['files_list'])
         data['metadata']['sourceFolder']="//"
         js = {}
         js.update(data['metadata'])
@@ -657,6 +750,8 @@ class Archiver:
         #pw = getpass()
         #s.append(f"-user {user}:{pw}")
         s.append(f"-token {self.ds.client.token}")
+        #-nocopy prevents using rsync to copy the data to psi
+        s.append(f"-nocopy")
         if silent:
             s.append("-noninteractive")
         s.append("-allowexistingsource")
